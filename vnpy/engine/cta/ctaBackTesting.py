@@ -6,13 +6,14 @@
 """
 from __future__ import division
 
+import multiprocessing
 from collections import OrderedDict
 from datetime import datetime, timedelta
 from itertools import product
 
 import pymongo
 
-from vnpy.engine.cta.ctaBase import CtaTickData, StopOrder
+from vnpy.engine.cta.ctaBase import CtaTickData, CtaBarData, StopOrder
 from vnpy.engine.cta.ctaConstant import *
 from vnpy.utils.vtConstant import *
 from vnpy.utils.vtFunction import loadMongoSetting
@@ -49,9 +50,14 @@ class BackTestingEngine(object):
         self.strategy = None  # 回测策略
         self.mode = self.BAR_MODE  # 回测模式，默认为K线
 
+        self.startDate = ''
+        self.initDays = 0
+        self.endDate = ''
+
         self.slippage = 0  # 回测时假设的滑点
         self.rate = 0  # 回测时假设的佣金比例（适用于百分比佣金）
         self.size = 1  # 合约大小，默认为1
+        self.priceTick = 0  # 价格最小变动
 
         self.dbClient = None  # 数据库客户端
         self.dbCursor = None  # 数据库指针
@@ -84,6 +90,9 @@ class BackTestingEngine(object):
     # ----------------------------------------------------------------------
     def setStartDate(self, startDate='20100416', initDays=10):
         """设置回测的启动日期"""
+        self.startDate = startDate
+        self.initDays = initDays
+
         self.dataStartDate = datetime.strptime(startDate, '%Y%m%d')
 
         initTimeDelta = timedelta(initDays)
@@ -92,8 +101,11 @@ class BackTestingEngine(object):
     # ----------------------------------------------------------------------
     def setEndDate(self, endDate=''):
         """设置回测的结束日期"""
+        self.endDate = endDate
         if endDate:
             self.dataEndDate = datetime.strptime(endDate, '%Y%m%d')
+            # 若不修改时间则会导致不包含dataEndDate当天数据
+            self.dataEndDate.replace(hour=23, minute=59)
 
     # ----------------------------------------------------------------------
     def setBackTestingMode(self, mode):
@@ -106,7 +118,7 @@ class BackTestingEngine(object):
         self.dbName = dbName
         self.symbol = symbol
 
-    # ----------------------------------------------------------------------
+        # ----------------------------------------------------------------------
     def loadHistoryData(self):
         """载入历史数据"""
         host, port = loadMongoSetting()
@@ -130,18 +142,19 @@ class BackTestingEngine(object):
         initCursor = collection.find(flt)
 
         # 将数据从查询指针中读取出，并生成列表
+        self.initData = []  # 清空initData列表
         for d in initCursor:
             data = dataClass()
             data.__dict__ = d
             self.initData.append(data)
 
-            # 载入回测数据
+        # 载入回测数据
         if not self.dataEndDate:
             flt = {'datetime': {'$gte': self.strategyStartDate}}  # 数据过滤条件
         else:
             flt = {'datetime': {'$gte': self.strategyStartDate,
                                 '$lte': self.dataEndDate}}
-        self.dbCursor = collection.find(flt)
+        self.dbCursor = collection.find(flt).sort([("datetime", 1)])
 
         self.output(u'载入完成，数据量：%s' % (initCursor.count() + self.dbCursor.count()))
 
@@ -213,7 +226,7 @@ class BackTestingEngine(object):
 
         order = VtOrderData()
         order.vtSymbol = vtSymbol
-        order.price = price
+        order.price = self.roundToPriceTick(price)
         order.totalVolume = volume
         order.status = STATUS_NOTTRADED  # 刚提交尚未成交
         order.orderID = orderID
@@ -257,7 +270,7 @@ class BackTestingEngine(object):
 
         so = StopOrder()
         so.vtSymbol = vtSymbol
-        so.price = price
+        so.price = self.roundToPriceTick(price)
         so.volume = volume
         so.strategy = strategy
         so.stopOrderID = stopOrderID
@@ -309,8 +322,12 @@ class BackTestingEngine(object):
         # 遍历限价单字典中的所有限价单
         for orderID, order in self.workingLimitOrderDict.items():
             # 判断是否会成交
-            buyCross = order.direction == DIRECTION_LONG and order.price >= buyCrossPrice
-            sellCross = order.direction == DIRECTION_SHORT and order.price <= sellCrossPrice
+            buyCross = (order.direction == DIRECTION_LONG and
+                        order.price >= buyCrossPrice > 0)  # 国内的tick行情在涨停时askPrice1为0，此时买无法成交
+
+            sellCross = (order.direction == DIRECTION_SHORT and
+                         order.price <= sellCrossPrice and
+                         sellCrossPrice > 0)  # 国内的tick行情在跌停时bidPrice1为0，此时卖无法成交
 
             # 如果发生了成交
             if buyCross or sellCross:
@@ -422,12 +439,11 @@ class BackTestingEngine(object):
                 self.limitOrderDict[orderID] = order
 
                 # 从字典中删除该限价单
-                del self.workingStopOrderDict[stopOrderID]
+                if stopOrderID in self.workingStopOrderDict:
+                    del self.workingStopOrderDict[stopOrderID]
 
-                # ----------------------------------------------------------------------
-
-    @staticmethod
-    def insertData(dbName, collectionName, data):
+    # ----------------------------------------------------------------------
+    def insertData(self, dbName, collectionName, data):
         """考虑到回测中不允许向数据库插入数据，防止实盘交易中的一些代码出错"""
         pass
 
@@ -448,8 +464,7 @@ class BackTestingEngine(object):
         self.logList.append(log)
 
     # ----------------------------------------------------------------------
-    @staticmethod
-    def output(content):
+    def output(self, content):
         """输出内容"""
         print str(datetime.now()) + "\t" + content
 
@@ -465,6 +480,9 @@ class BackTestingEngine(object):
 
         longTrade = []  # 未平仓的多头交易
         shortTrade = []  # 未平仓的空头交易
+
+        tradeTimeList = []  # 每笔成交时间戳
+        posList = [0]  # 每笔成交后的持仓情况
 
         for trade in self.tradeDict.values():
             # 多头交易
@@ -484,6 +502,9 @@ class BackTestingEngine(object):
                                                exitTrade.price, exitTrade.dt,
                                                -closedVolume, self.rate, self.slippage, self.size)
                         resultList.append(result)
+
+                        posList.extend([-1, 0])
+                        tradeTimeList.extend([result.entryDt, result.exitDt])
 
                         # 计算未清算部分
                         entryTrade.volume -= closedVolume
@@ -525,6 +546,9 @@ class BackTestingEngine(object):
                                                exitTrade.price, exitTrade.dt,
                                                closedVolume, self.rate, self.slippage, self.size)
                         resultList.append(result)
+
+                        posList.extend([1, 0])
+                        tradeTimeList.extend([result.entryDt, result.exitDt])
 
                         # 计算未清算部分
                         entryTrade.volume -= closedVolume
@@ -598,9 +622,17 @@ class BackTestingEngine(object):
 
         # 计算盈亏相关数据
         winningRate = winningResult / totalResult * 100  # 胜率
-        averageWinning = totalWinning / winningResult if winningResult else 0 # 平均每笔盈利
-        averageLosing = totalLosing / losingResult  # 平均每笔亏损
-        profitLossRatio = -averageWinning / averageLosing  # 盈亏比
+
+        averageWinning = 0  # 这里把数据都初始化为0
+        averageLosing = 0
+        profitLossRatio = 0
+
+        if winningResult:
+            averageWinning = totalWinning / winningResult  # 平均每笔盈利
+        if losingResult:
+            averageLosing = totalLosing / losingResult  # 平均每笔亏损
+        if averageLosing:
+            profitLossRatio = -averageWinning / averageLosing  # 盈亏比
 
         # 返回回测结果
         d = {}
@@ -619,6 +651,8 @@ class BackTestingEngine(object):
         d['averageWinning'] = averageWinning
         d['averageLosing'] = averageLosing
         d['profitLossRatio'] = profitLossRatio
+        d['posList'] = posList
+        d['tradeTimeList'] = tradeTimeList
 
         return d
 
@@ -644,24 +678,44 @@ class BackTestingEngine(object):
         self.output(u'平均每笔佣金：\t%s' % formatNumber(d['totalCommission'] / d['totalResult']))
 
         self.output(u'胜率\t\t%s%%' % formatNumber(d['winningRate']))
-        self.output(u'平均每笔盈利\t%s' % formatNumber(d['averageWinning']))
-        self.output(u'平均每笔亏损\t%s' % formatNumber(d['averageLosing']))
+        self.output(u'盈利交易平均值\t%s' % formatNumber(d['averageWinning']))
+        self.output(u'亏损交易平均值\t%s' % formatNumber(d['averageLosing']))
         self.output(u'盈亏比：\t%s' % formatNumber(d['profitLossRatio']))
 
         # 绘图
         import matplotlib.pyplot as plt
+        import numpy as np
 
-        pCapital = plt.subplot(3, 1, 1)
+        try:
+            import seaborn as sns  # 如果安装了seaborn则设置为白色风格
+            sns.set_style('whitegrid')
+        except ImportError:
+            pass
+
+        pCapital = plt.subplot(4, 1, 1)
         pCapital.set_ylabel("capital")
-        pCapital.plot(d['capitalList'])
+        pCapital.plot(d['capitalList'], color='r', lw=0.8)
 
-        pDD = plt.subplot(3, 1, 2)
+        pDD = plt.subplot(4, 1, 2)
         pDD.set_ylabel("DD")
-        pDD.bar(range(len(d['drawdownList'])), d['drawdownList'])
+        pDD.bar(range(len(d['drawdownList'])), d['drawdownList'], color='g')
 
-        pPnl = plt.subplot(3, 1, 3)
+        pPnl = plt.subplot(4, 1, 3)
         pPnl.set_ylabel("pnl")
-        pPnl.hist(d['pnlList'], bins=50)
+        pPnl.hist(d['pnlList'], bins=50, color='c')
+
+        pPos = plt.subplot(4, 1, 4)
+        pPos.set_ylabel("Position")
+        if d['posList'][-1] == 0:
+            del d['posList'][-1]
+        tradeTimeIndex = [item.strftime("%m/%d %H:%M:%S") for item in d['tradeTimeList']]
+        xindex = np.arange(0, len(tradeTimeIndex), np.int(len(tradeTimeIndex) / 10))
+        tradeTimeIndex = map(lambda i: tradeTimeIndex[i], xindex)
+        pPos.plot(d['posList'], color='k', drawstyle='steps-pre')
+        pPos.set_ylim(-1.2, 1.2)
+        plt.sca(pPos)
+        plt.tight_layout()
+        plt.xticks(xindex, tradeTimeIndex, rotation=30)  # 旋转15
 
         plt.show()
 
@@ -685,6 +739,11 @@ class BackTestingEngine(object):
     def setRate(self, rate):
         """设置佣金比例"""
         self.rate = rate
+
+    # ----------------------------------------------------------------------
+    def setPriceTick(self, priceTick):
+        """设置价格最小变动"""
+        self.priceTick = priceTick
 
     # ----------------------------------------------------------------------
     def runOptimization(self, strategyClass, optimizationSetting):
@@ -718,6 +777,7 @@ class BackTestingEngine(object):
         self.output(u'优化结果：')
         for result in resultList:
             self.output(u'%s: %s' % (result[0], result[1]))
+        return result
 
     # ----------------------------------------------------------------------
     def clearBackTestingResult(self):
@@ -735,6 +795,47 @@ class BackTestingEngine(object):
         # 清空成交相关
         self.tradeCount = 0
         self.tradeDict.clear()
+
+    # ----------------------------------------------------------------------
+    def runParallelOptimization(self, strategyClass, optimizationSetting):
+        """并行优化参数"""
+        # 获取优化设置
+        settingList = optimizationSetting.generateSetting()
+        targetName = optimizationSetting.optimizeTarget
+
+        # 检查参数设置问题
+        if not settingList or not targetName:
+            self.output(u'优化设置有问题，请检查')
+
+        # 多进程优化，启动一个对应CPU核心数量的进程池
+        pool = multiprocessing.Pool(multiprocessing.cpu_count())
+        l = []
+
+        for setting in settingList:
+            l.append(pool.apply_async(optimize, (strategyClass, setting,
+                                                 targetName, self.mode,
+                                                 self.startDate, self.initDays, self.endDate,
+                                                 self.slippage, self.rate, self.size,
+                                                 self.dbName, self.symbol)))
+        pool.close()
+        pool.join()
+
+        # 显示结果
+        resultList = [res.get() for res in l]
+        resultList.sort(reverse=True, key=lambda result: result[1])
+        self.output('-' * 30)
+        self.output(u'优化结果：')
+        for result in resultList:
+            self.output(u'%s: %s' % (result[0], result[1]))
+
+    # ----------------------------------------------------------------------
+    def roundToPriceTick(self, price):
+        """取整价格到合约最小价格变动"""
+        if not self.priceTick:
+            return price
+
+        newPrice = round(price / self.priceTick, 0) * self.priceTick
+        return newPrice
 
 
 ########################################################################
@@ -772,10 +873,14 @@ class OptimizationSetting(object):
         self.optimizeTarget = ''  # 优化目标字段
 
     # ----------------------------------------------------------------------
-    def addParameter(self, name, start, end, step):
+    def addParameter(self, name, start, end=None, step=None):
         """增加优化参数"""
-        if end <= start:
-            print u'参数起始点必须小于终止点'
+        if end is None and step is None:
+            self.paramDict[name] = [start]
+            return
+
+        if end < start:
+            print u'参数起始点必须不大于终止点'
             return
 
         if step <= 0:
@@ -822,37 +927,26 @@ def formatNumber(n):
     return format(n, ',')  # 加上千分符
 
 
-if __name__ == '__main__':
-    # 以下内容是一段回测脚本的演示，用户可以根据自己的需求修改
-    # 建议使用ipython notebook或者spyder来做回测
-    # 同样可以在命令模式下进行回测（一行一行输入运行）
-    from vnpy.engine.cta.ctaDemo import *
-
-    # 创建回测引擎
+# ----------------------------------------------------------------------
+def optimize(strategyClass, setting, targetName,
+             mode, startDate, initDays, endDate,
+             slippage, rate, size,
+             dbName, symbol):
+    """多进程优化时跑在每个进程中运行的函数"""
     engine = BackTestingEngine()
+    engine.setBackTestingMode(mode)
+    engine.setStartDate(startDate, initDays)
+    engine.setEndDate(endDate)
+    engine.setSlippage(slippage)
+    engine.setRate(rate)
+    engine.setSize(size)
+    engine.setDatabase(dbName, symbol)
 
-    # 设置引擎的回测模式为K线
-    engine.setBackTestingMode(engine.TICK_MODE)
-
-    # 设置回测用的数据起始日期
-    engine.setStartDate('20110101', initDays=0)
-
-    # 载入历史数据到引擎中
-    engine.setDatabase(TICK_DB_NAME, 'rb1701')
-
-    # 设置产品相关参数
-    engine.setSlippage(0.2)  # 股指1跳
-    engine.setRate(0.3 / 10000)  # 万0.3
-    engine.setSize(300)  # 股指合约大小
-
-    # 在引擎中创建策略对象
-    engine.initStrategy(DoubleEmaDemo, {})
-
-    # 开始跑回测
+    engine.initStrategy(strategyClass, setting)
     engine.runBackTesting()
-
-    # 显示回测结果
-    # spyder或者ipython notebook中运行时，会弹出盈亏曲线图
-    # 直接在cmd中回测则只会打印一些回测数值
-    engine.showBackTestingResult()
-
+    d = engine.calculateBackTestingResult()
+    try:
+        targetValue = d[targetName]
+    except KeyError:
+        targetValue = 0
+    return str(setting), targetValue
