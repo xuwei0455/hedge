@@ -1,12 +1,7 @@
 [
     {
-        "name": "double ema",
-        "className": "DoubleEmaDemo",
-        "vtSymbol": "IF1602"
-    },
-    {
-        "name": "order manage",
-        "className": "OrderManagementDemo",
-        "vtSymbol": "rb1701"
+        "name": "art rsi",
+        "className": "AtrRsiStrategy",
+        "vtSymbol": "rb1710"
     }
 ]

@@ -8,9 +8,6 @@
 在CTA_setting.json中写入具体每个策略对象的类和合约设置。
 """
 
-from ctaDemo import DoubleEmaDemo, OrderManagementDemo
 from strategy.StrategyAtrRsi import AtrRsiStrategy
 
-STRATEGY_CLASS = {'DoubleEmaDemo': DoubleEmaDemo,
-                  'OrderManagementDemo': OrderManagementDemo,
-                  'AtrRsiStrategy': AtrRsiStrategy}
+STRATEGY_CLASS = {'AtrRsiStrategy': AtrRsiStrategy}

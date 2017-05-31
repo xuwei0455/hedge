@@ -11,6 +11,8 @@
 import numpy as np
 import talib
 
+from datetime import time
+
 from vnpy.engine.cta.ctaBase import *
 from vnpy.engine.cta.ctaTemplate import CtaTemplate
 
@@ -22,19 +24,20 @@ class AtrRsiStrategy(CtaTemplate):
     author = u'用Python的交易员'
 
     # 策略参数
-    atrLength = 22  # 计算ATR指标的窗口数
-    atrMaLength = 10  # 计算ATR均线的窗口数
-    rsiLength = 5  # 计算RSI的窗口数
+    atrLength = 30  # 计算ATR指标的窗口数
+    atrMaLength = 30  # 计算ATR均线的窗口数
+    rsiLength = 15  # 计算RSI的窗口数
     rsiEntry = 16  # RSI的开仓信号
-    trailingPercent = 0.8  # 百分比移动止损
+    trailingPercent = 0.5  # 百分比移动止损
     initDays = 10  # 初始化数据所用的天数
     fixedSize = 1  # 每次交易的数量
 
     # 策略变量
     bar = None  # K线对象
     barMinute = EMPTY_STRING  # K线当前的分钟
+    barTime = None
 
-    bufferSize = 100  # 需要缓存的数据的大小
+    bufferSize = 31  # 需要缓存的数据的大小, 比需要的要大1
     bufferCount = 0  # 目前已经缓存了的数据的计数
     highArray = np.zeros(bufferSize)  # K线最高价的数组
     lowArray = np.zeros(bufferSize)  # K线最低价的数组
@@ -51,6 +54,13 @@ class AtrRsiStrategy(CtaTemplate):
     intraTradeHigh = 0  # 移动止损用的持仓期内最高价
     intraTradeLow = 0  # 移动止损用的持仓期内最低价
 
+    dealRange = [
+        (time(hour=0, minute=0), time(hour=0, minute=55)),
+        (time(hour=8, minute=55), time(hour=11, minute=25)),
+        (time(hour=13, minute=25), time(hour=14, minute=55)),
+        (time(hour=20, minute=55), time(hour=23, minute=59))
+    ]
+
     orderList = []  # 保存委托代码的列表
 
     # 参数列表，保存了参数的名称
@@ -62,6 +72,7 @@ class AtrRsiStrategy(CtaTemplate):
                  'atrMaLength',
                  'rsiLength',
                  'rsiEntry',
+                 'bufferCount',
                  'trailingPercent']
 
     # 变量列表，保存了变量的名称
@@ -152,6 +163,13 @@ class AtrRsiStrategy(CtaTemplate):
             self.cancelOrder(orderID)
         self.orderList = []
 
+        # 处理开市
+        if self.barTime and (bar.datetime - self.barTime).seconds > 3600:
+            self.bufferCount = 0
+            self.closeArray, self.highArray, self.lowArray = [np.zeros(self.bufferSize) for n in range(3)]
+
+        self.barTime = bar.datetime
+
         # 保存K线数据
         self.closeArray[0:self.bufferSize - 1] = self.closeArray[1:self.bufferSize]
         self.highArray[0:self.bufferSize - 1] = self.highArray[1:self.bufferSize]
@@ -161,10 +179,6 @@ class AtrRsiStrategy(CtaTemplate):
         self.highArray[-1] = bar.high
         self.lowArray[-1] = bar.low
 
-        self.bufferCount += 1
-        if self.bufferCount < self.bufferSize:
-            return
-
         # 计算指标数值
         self.atrValue = talib.ATR(self.highArray,
                                   self.lowArray,
@@ -173,52 +187,67 @@ class AtrRsiStrategy(CtaTemplate):
         self.atrArray[0:self.bufferSize - 1] = self.atrArray[1:self.bufferSize]
         self.atrArray[-1] = self.atrValue
 
-        self.atrCount += 1
-        if self.atrCount < self.bufferSize:
-            return
-
         self.atrMa = talib.MA(self.atrArray,
                               self.atrMaLength)[-1]
-        self.rsiValue = talib.RSI(self.closeArray,
-                                  self.rsiLength)[-1]
+        # self.rsiValue = talib.RSI(self.closeArray,
+        #                           self.rsiLength)[-1]
+        self.rsiArray = talib.RSI(self.closeArray,
+                                  self.rsiLength)
+
+        self.bufferCount += 1
 
         # 判断是否要进行交易
-
+        # deal_time = any([start <= bar.datetime.time() <= end for (start, end) in self.dealRange])
         # 当前无仓位
-        if self.pos == 0:
-            self.intraTradeHigh = bar.high
-            self.intraTradeLow = bar.low
+        if not (time(hour=14, minute=55) <= bar.datetime.time() <= time(hour=15, minute=00)):
+            if self.pos == 0 and self.bufferCount >= self.bufferSize:
+                self.intraTradeHigh = bar.high
+                self.intraTradeLow = bar.low
 
-            # ATR数值上穿其移动平均线，说明行情短期内波动加大
-            # 即处于趋势的概率较大，适合CTA开仓
-            if self.atrValue > self.atrMa:
-                # 使用RSI指标的趋势行情时，会在超买超卖区钝化特征，作为开仓信号
-                if self.rsiValue > self.rsiBuy:
-                    # 这里为了保证成交，选择超价5个整指数点下单
-                    self.short(bar.close + 5, self.fixedSize)
+                # ATR数值上穿其移动平均线，说明行情短期内波动加大
+                # 即处于趋势的概率较大，适合CTA开仓
+                if self.atrValue > self.atrMa:
 
-                elif self.rsiValue < self.rsiSell:
-                    self.buy(bar.close - 5, self.fixedSize)
+                    if len(filter(lambda v: v > self.rsiBuy, self.rsiArray[-3:])) == 2:
+                    # 使用RSI指标的趋势行情时，会在超买超卖区钝化特征，作为开仓信号
+                    # if self.rsiValue > self.rsiBuy:
+                        # 这里为了保证成交，选择超价5个整指数点下单
+                        self.buy(bar.close, self.fixedSize)
 
-        # 持有多头仓位
-        elif self.pos > 0:
-            # 计算多头持有期内的最高价，以及重置最低价
-            self.intraTradeHigh = max(self.intraTradeHigh, bar.high)
-            self.intraTradeLow = bar.low
-            # 计算多头移动止损
-            longStop = self.intraTradeHigh * (1 - self.trailingPercent / 100)
-            # 发出本地止损委托，并且把委托号记录下来，用于后续撤单
-            orderID = self.sell(longStop, abs(self.pos), stop=True)
-            self.orderList.append(orderID)
+                    elif len(filter(lambda v: v < self.rsiSell, self.rsiArray[-3:])) == 2:
+                    # elif self.rsiValue < self.rsiSell:
+                        self.short(bar.close, self.fixedSize)
 
-        # 持有空头仓位
-        elif self.pos < 0:
-            self.intraTradeLow = min(self.intraTradeLow, bar.low)
-            self.intraTradeHigh = bar.high
+            # 持有多头仓位
+            elif self.pos > 0:
+                # 计算多头持有期内的最高价，以及重置最低价
+                self.intraTradeHigh = max(self.intraTradeHigh, bar.high)
+                self.intraTradeLow = bar.low
+                # 计算多头移动止损
+                longStopPer = self.intraTradeHigh * (1 - self.trailingPercent / 100)
+                longStopAbs = self.intraTradeHigh - 0.3 * (self.intraTradeHigh - self.intraTradeLow)
+                longStop = min(longStopPer, longStopAbs)
+                # 发出本地止损委托，并且把委托号记录下来，用于后续撤单
+                orderID = self.sell(longStop - 1, abs(self.pos), stop=True)
+                self.orderList.append(orderID)
 
-            shortStop = self.intraTradeLow * (1 + self.trailingPercent / 100)
-            orderID = self.cover(shortStop, abs(self.pos), stop=True)
-            self.orderList.append(orderID)
+            # 持有空头仓位
+            elif self.pos < 0:
+                self.intraTradeLow = min(self.intraTradeLow, bar.low)
+                self.intraTradeHigh = bar.high
+
+                shortStopPer = self.intraTradeLow * (1 + self.trailingPercent / 100)
+                shortStopAbs = self.intraTradeLow + 0.3 * (self.intraTradeHigh - self.intraTradeLow)
+                shortStop = max(shortStopPer, shortStopAbs)
+                orderID = self.cover(shortStop + 1, abs(self.pos), stop=True)
+                self.orderList.append(orderID)
+        else:
+            if self.pos > 0:
+                vtOrderID = self.sell(bar.close - 2, abs(self.pos))
+                self.orderList.append(vtOrderID)
+            elif self.pos < 0:
+                vtOrderID = self.cover(bar.close + 2, abs(self.pos))
+                self.orderList.append(vtOrderID)
 
         # 发出状态更新事件
         self.putEvent()
@@ -235,6 +264,9 @@ class AtrRsiStrategy(CtaTemplate):
 
 
 if __name__ == '__main__':
+
+    # todo: 找到3年内稳定盈利的策略，最大回撤不超过本金15%
+    # todo: 将vnpy的修改同步到master分支，稳定可运行
     # 提供直接双击回测的功能
     # 导入PyQt4的包是为了保证matplotlib使用PyQt4而不是PySide，防止初始化出错
     from vnpy.engine.cta.ctaBackTesting import BackTestingEngine
@@ -246,8 +278,8 @@ if __name__ == '__main__':
     engine.setBackTestingMode(engine.TICK_MODE)
 
     # 设置回测用的数据起始日期
-    engine.setStartDate('20160801', initDays=0)
-    engine.setEndDate('20160930')
+    engine.setStartDate('20160101', initDays=0)
+    # engine.setEndDate('20160201')
 
     # 设置产品相关参数
     engine.setSlippage(1)  # 股指1跳
@@ -256,10 +288,10 @@ if __name__ == '__main__':
     engine.setPriceTick(1)  # 股指最小价格变动
 
     # 设置使用的历史数据库
-    engine.setDatabase("BackTest", 'AGMI')
+    engine.setDatabase("BackTest", 'RBMI')
 
     # 在引擎中创建策略对象
-    d = {'atrLength': 11}
+    d = {'atrLength': 30, 'atrMaLength': 30, 'rsiLength': 15}
     engine.initStrategy(AtrRsiStrategy, d)
 
     # 开始跑回测
@@ -268,12 +300,14 @@ if __name__ == '__main__':
     # 显示回测结果
     engine.showBackTestingResult()
 
+    # from vnpy.engine.cta.ctaBackTesting import OptimizationSetting
     ## 跑优化
     # setting = OptimizationSetting()                 # 新建一个优化任务设置对象
     # setting.setOptimizeTarget('capital')            # 设置优化排序的目标是策略净盈利
-    # setting.addParameter('atrLength', 12, 20, 2)    # 增加第一个优化参数atrLength，起始11，结束12，步进1
-    # setting.addParameter('atrMa', 20, 30, 5)        # 增加第二个优化参数atrMa，起始20，结束30，步进1
-    # setting.addParameter('rsiLength', 5)            # 增加一个固定数值的参数
+    # setting.addParameter('atrLength', 7, 22, 1)    # 增加第一个优化参数atrLength，起始11，结束12，步进1
+    # setting.addParameter('atrMaLength', 1, 20, 1)        # 增加第二个优化参数atrMa，起始20，结束30，步进1
+    # setting.addParameter('atrMaLength', 5, 30, 2)            # 增加一个固定数值的参数
+    # setting.addParameter('trailingPercent', 0.1, 1.9, 0.1)            # 增加一个固定数值的参数
 
     ## 性能测试环境：I7-3770，主频3.4G, 8核心，内存16G，Windows 7 专业版
     ## 测试时还跑着一堆其他的程序，性能仅供参考
@@ -284,6 +318,6 @@ if __name__ == '__main__':
     # engine.runOptimization(AtrRsiStrategy, setting)
 
     ## 多进程优化，耗时：89秒
-    ##engine.runParallelOptimization(AtrRsiStrategy, setting)
+    # engine.runParallelOptimization(AtrRsiStrategy, setting)
 
     # print u'耗时：%s' %(time.time()-start)

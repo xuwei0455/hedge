@@ -13,10 +13,11 @@ from itertools import product
 
 import pymongo
 
-from vnpy.engine.cta.ctaBase import CtaTickData, CtaBarData, StopOrder
+from vnpy.engine.cta.ctaBase import StopOrder
 from vnpy.engine.cta.ctaConstant import *
+from vnpy.engine.vt.vtGlobal import globalSetting
+from vnpy.engine.vt.vtObject import VtBarData, VtTickData
 from vnpy.utils.vtConstant import *
-from vnpy.utils.vtFunction import loadMongoSetting
 from vnpy.utils.vtGateway import VtOrderData, VtTradeData
 
 
@@ -102,13 +103,16 @@ class BackTestingEngine(object):
     def setEndDate(self, endDate=''):
         """设置回测的结束日期"""
         self.endDate = endDate
+
         if endDate:
             self.dataEndDate = datetime.strptime(endDate, '%Y%m%d')
-            # 若不修改时间则会导致不包含dataEndDate当天数据
-            self.dataEndDate.replace(hour=23, minute=59)
 
-    # ----------------------------------------------------------------------
-    def setBackTestingMode(self, mode):
+            # 若不修改时间则会导致不包含dataEndDate当天数据
+            self.dataEndDate = self.dataEndDate.replace(hour=23, minute=59)
+
+            # ----------------------------------------------------------------------
+
+    def setBacktestingMode(self, mode):
         """设置回测模式"""
         self.mode = mode
 
@@ -118,22 +122,20 @@ class BackTestingEngine(object):
         self.dbName = dbName
         self.symbol = symbol
 
-        # ----------------------------------------------------------------------
+    # ----------------------------------------------------------------------
     def loadHistoryData(self):
         """载入历史数据"""
-        host, port = loadMongoSetting()
-
-        self.dbClient = pymongo.MongoClient(host, port)
+        self.dbClient = pymongo.MongoClient(globalSetting['mongoHost'], globalSetting['mongoPort'])
         collection = self.dbClient[self.dbName][self.symbol]
 
         self.output(u'开始载入数据')
 
         # 首先根据回测模式，确认要使用的数据类
         if self.mode == self.BAR_MODE:
-            dataClass = CtaBarData
+            dataClass = VtBarData
             func = self.newBar
         else:
-            dataClass = CtaTickData
+            dataClass = VtTickData
             func = self.newTick
 
         # 载入初始化需要用的数据
@@ -148,30 +150,28 @@ class BackTestingEngine(object):
             data.__dict__ = d
             self.initData.append(data)
 
-        # 载入回测数据
+            # 载入回测数据
         if not self.dataEndDate:
             flt = {'datetime': {'$gte': self.strategyStartDate}}  # 数据过滤条件
         else:
             flt = {'datetime': {'$gte': self.strategyStartDate,
                                 '$lte': self.dataEndDate}}
+        self.dbCursor = collection.find(flt)
 
-        self.dbCursor = collection.find(flt).sort([("datetime", 1)])
-
-        self.output(u'载入完成，初始化数据：%s；回测数据：%s；总数据：%s；' %
-                    (initCursor.count(), self.dbCursor.count(), initCursor.count() + self.dbCursor.count()))
+        self.output(u'载入完成，数据量：%s' % (initCursor.count() + self.dbCursor.count()))
 
     # ----------------------------------------------------------------------
-    def runBackTesting(self):
+    def runBacktesting(self):
         """运行回测"""
         # 载入历史数据
         self.loadHistoryData()
 
         # 首先根据回测模式，确认要使用的数据类
         if self.mode == self.BAR_MODE:
-            dataClass = CtaBarData
+            dataClass = VtBarData
             func = self.newBar
         else:
-            dataClass = CtaTickData
+            dataClass = VtTickData
             func = self.newTick
 
         self.output(u'开始回测')
@@ -325,7 +325,8 @@ class BackTestingEngine(object):
         for orderID, order in self.workingLimitOrderDict.items():
             # 判断是否会成交
             buyCross = (order.direction == DIRECTION_LONG and
-                        order.price >= buyCrossPrice > 0)  # 国内的tick行情在涨停时askPrice1为0，此时买无法成交
+                        order.price >= buyCrossPrice and
+                        buyCrossPrice > 0)  # 国内的tick行情在涨停时askPrice1为0，此时买无法成交
 
             sellCross = (order.direction == DIRECTION_SHORT and
                          order.price <= sellCrossPrice and
@@ -444,7 +445,8 @@ class BackTestingEngine(object):
                 if stopOrderID in self.workingStopOrderDict:
                     del self.workingStopOrderDict[stopOrderID]
 
-    # ----------------------------------------------------------------------
+                    # ----------------------------------------------------------------------
+
     def insertData(self, dbName, collectionName, data):
         """考虑到回测中不允许向数据库插入数据，防止实盘交易中的一些代码出错"""
         pass
@@ -470,8 +472,9 @@ class BackTestingEngine(object):
         """输出内容"""
         print str(datetime.now()) + "\t" + content
 
-    # ----------------------------------------------------------------------
-    def calculateBackTestingResult(self):
+        # ----------------------------------------------------------------------
+
+    def calculateBacktestingResult(self):
         """
         计算回测结果
         """
@@ -601,7 +604,6 @@ class BackTestingEngine(object):
         totalLosing = 0  # 总亏损金额
 
         for result in resultList:
-            print result.pnl, result.entryDt, result.exitDt
             capital += result.pnl
             maxCapital = max(capital, maxCapital)
             drawdown = capital - maxCapital
@@ -660,12 +662,9 @@ class BackTestingEngine(object):
         return d
 
     # ----------------------------------------------------------------------
-    def showBackTestingResult(self):
+    def showBacktestingResult(self):
         """显示回测结果"""
-        d = self.calculateBackTestingResult()
-
-        if not d:
-            return None
+        d = self.calculateBacktestingResult()
 
         # 输出
         self.output('-' * 30)
@@ -723,8 +722,7 @@ class BackTestingEngine(object):
         plt.show()
 
     # ----------------------------------------------------------------------
-    @staticmethod
-    def putStrategyEvent(name):
+    def putStrategyEvent(self, name):
         """发送策略更新事件，回测中忽略"""
         pass
 
@@ -762,12 +760,12 @@ class BackTestingEngine(object):
         # 遍历优化
         resultList = []
         for setting in settingList:
-            self.clearBackTestingResult()
+            self.clearBacktestingResult()
             self.output('-' * 30)
             self.output('setting: %s' % str(setting))
             self.initStrategy(strategyClass, setting)
-            self.runBackTesting()
-            d = self.calculateBackTestingResult()
+            self.runBacktesting()
+            d = self.calculateBacktestingResult()
             try:
                 targetValue = d[targetName]
             except KeyError:
@@ -783,7 +781,7 @@ class BackTestingEngine(object):
         return result
 
     # ----------------------------------------------------------------------
-    def clearBackTestingResult(self):
+    def clearBacktestingResult(self):
         """清空之前回测的结果"""
         # 清空限价单相关
         self.limitOrderCount = 0
@@ -831,7 +829,8 @@ class BackTestingEngine(object):
         for result in resultList:
             self.output(u'%s: %s' % (result[0], result[1]))
 
-    # ----------------------------------------------------------------------
+            # ----------------------------------------------------------------------
+
     def roundToPriceTick(self, price):
         """取整价格到合约最小价格变动"""
         if not self.priceTick:
@@ -926,8 +925,8 @@ class OptimizationSetting(object):
 # ----------------------------------------------------------------------
 def formatNumber(n):
     """格式化数字到字符串"""
-    n = round(n, 2)  # 保留两位小数
-    return format(n, ',')  # 加上千分符
+    rn = round(n, 2)  # 保留两位小数
+    return format(rn, ',')  # 加上千分符
 
 
 # ----------------------------------------------------------------------
@@ -937,7 +936,7 @@ def optimize(strategyClass, setting, targetName,
              dbName, symbol):
     """多进程优化时跑在每个进程中运行的函数"""
     engine = BackTestingEngine()
-    engine.setBackTestingMode(mode)
+    engine.setBacktestingMode(mode)
     engine.setStartDate(startDate, initDays)
     engine.setEndDate(endDate)
     engine.setSlippage(slippage)
@@ -946,8 +945,8 @@ def optimize(strategyClass, setting, targetName,
     engine.setDatabase(dbName, symbol)
 
     engine.initStrategy(strategyClass, setting)
-    engine.runBackTesting()
-    d = engine.calculateBackTestingResult()
+    engine.runBacktesting()
+    d = engine.calculateBacktestingResult()
     try:
         targetValue = d[targetName]
     except KeyError:

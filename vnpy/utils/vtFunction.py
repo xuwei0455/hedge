@@ -33,8 +33,10 @@ def safeUnicode(value):
 # ----------------------------------------------------------------------
 def loadMongoSetting():
     """载入MongoDB数据库的配置"""
+    fileName = findConfPath('VT_setting.json')
+
     try:
-        f = file("VT_setting.json")
+        f = file(fileName)
         setting = json.load(f)
         host = setting['mongoHost']
         port = setting['mongoPort']

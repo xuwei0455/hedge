@@ -12,7 +12,8 @@ DIRECTION_LONG = u'多'
 DIRECTION_SHORT = u'空'
 DIRECTION_UNKNOWN = u'未知'
 DIRECTION_NET = u'净'
-DIRECTION_SELL = u'卖出'  # IB接口
+DIRECTION_SELL = u'卖出'              # IB接口
+DIRECTION_COVEREDSHORT = u'备兑空'    # 证券期权
 
 # 开平常量
 OFFSET_NONE = u'无开平'
@@ -27,6 +28,7 @@ STATUS_NOTTRADED = u'未成交'
 STATUS_PARTTRADED = u'部分成交'
 STATUS_ALLTRADED = u'全部成交'
 STATUS_CANCELLED = u'已撤销'
+STATUS_REJECTED = u'拒单'
 STATUS_UNKNOWN = u'未知'
 
 # 合约类型常量
@@ -52,30 +54,47 @@ OPTION_CALL = u'看涨期权'
 OPTION_PUT = u'看跌期权'
 
 # 交易所类型
-EXCHANGE_SSE = 'SSE'  # 上交所
-EXCHANGE_SZSE = 'SZSE'  # 深交所
-EXCHANGE_CFFEX = 'CFFEX'  # 中金所
-EXCHANGE_SHFE = 'SHFE'  # 上期所
-EXCHANGE_CZCE = 'CZCE'  # 郑商所
-EXCHANGE_DCE = 'DCE'  # 大商所
-EXCHANGE_SGE = 'SGE'  # 上金所
-EXCHANGE_UNKNOWN = 'UNKNOWN'  # 未知交易所
-EXCHANGE_NONE = ''  # 空交易所
-EXCHANGE_HKEX = 'HKEX'  # 港交所
+EXCHANGE_SSE = 'SSE'       # 上交所
+EXCHANGE_SZSE = 'SZSE'     # 深交所
+EXCHANGE_CFFEX = 'CFFEX'   # 中金所
+EXCHANGE_SHFE = 'SHFE'     # 上期所
+EXCHANGE_CZCE = 'CZCE'     # 郑商所
+EXCHANGE_DCE = 'DCE'       # 大商所
+EXCHANGE_SGE = 'SGE'       # 上金所
+EXCHANGE_INE = 'INE'       # 国际能源交易中心
+EXCHANGE_UNKNOWN = 'UNKNOWN'# 未知交易所
+EXCHANGE_NONE = ''          # 空交易所
+EXCHANGE_HKEX = 'HKEX'      # 港交所
+EXCHANGE_HKFE = 'HKFE'      # 香港期货交易所
 
-EXCHANGE_SMART = 'SMART'  # IB智能路由（股票、期权）
-EXCHANGE_NYMEX = 'NYMEX'  # IB 期货
-EXCHANGE_GLOBEX = 'GLOBEX'  # CME电子交易平台
-EXCHANGE_IDEALPRO = 'IDEALPRO'  # IB外汇ECN
+
+EXCHANGE_SMART = 'SMART'       # IB智能路由（股票、期权）
+EXCHANGE_NYMEX = 'NYMEX'       # IB 期货
+EXCHANGE_GLOBEX = 'GLOBEX'     # CME电子交易平台
+EXCHANGE_IDEALPRO = 'IDEALPRO' # IB外汇ECN
 
 EXCHANGE_CME = 'CME'           # CME交易所
 EXCHANGE_ICE = 'ICE'           # ICE交易所
+EXCHANGE_LME = 'LME'           # LME交易所
 
 EXCHANGE_OANDA = 'OANDA'       # OANDA外汇做市商
 EXCHANGE_OKCOIN = 'OKCOIN'     # OKCOIN比特币交易所
+EXCHANGE_HUOBI = 'HUOBI'       # 火币比特币交易所
+EXCHANGE_LHANG = 'LHANG'       # 链行比特币交易所
 
 # 货币类型
-CURRENCY_USD = 'USD'  # 美元
-CURRENCY_CNY = 'CNY'  # 人民币
-CURRENCY_UNKNOWN = 'UNKNOWN'  # 未知货币
-CURRENCY_NONE = ''  # 空货币
+CURRENCY_USD = 'USD'            # 美元
+CURRENCY_CNY = 'CNY'            # 人民币
+CURRENCY_HKD = 'HKD'            # 港币
+CURRENCY_UNKNOWN = 'UNKNOWN'    # 未知货币
+CURRENCY_NONE = ''              # 空货币
+
+# 数据库
+LOG_DB_NAME = 'VnTrader_Log_Db'
+
+# 接口类型
+GATEWAYTYPE_EQUITY = 'equity'                   # 股票、ETF、债券
+GATEWAYTYPE_FUTURES = 'futures'                 # 期货、期权、贵金属
+GATEWAYTYPE_INTERNATIONAL = 'international'     # 外盘
+GATEWAYTYPE_BTC = 'btc'                         # 比特币
+GATEWAYTYPE_DATA = 'data'                       # 数据（非交易）
